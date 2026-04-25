@@ -106,6 +106,11 @@ Route::post('/admin/login',    [AdminController::class, 'login']);
 
 Route::middleware(['auth:sanctum', 'is_admin'])->group(function () {
     Route::post('/admin/logout', [AdminController::class, 'logout']);
+    Route::get('/admin/fournisseurs', [AdminController::class, 'getAllFournisseurs']);
+    Route::get('/admin/fournisseur/{id}',                      [AdminController::class, 'getFournisseur']);
+    Route::get('/admin/fournisseur/{id}/terrains',             [AdminController::class, 'getTerrainsFournisseur']);
+    Route::get('/admin/fournisseur/{id}/reservations',         [AdminController::class, 'getReservationsFournisseur']);
+    Route::get('/admin/fournisseur/{id}/payments',             [AdminController::class, 'getPaymentsFournisseur']);
     Route::post('/admin/fournisseur/{id}/activate',   [AdminController::class, 'activateFournisseur']);
     Route::post('/admin/fournisseur/{id}/deactivate', [AdminController::class, 'deactivateFournisseur']);
 });

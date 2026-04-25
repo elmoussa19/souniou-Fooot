@@ -28,7 +28,6 @@ class AdminController extends Controller
             ], 422);
         }
 
-        // Upload image
         $imagePath = null;
         if ($request->hasFile('image')) {
             $imagePath = $request->file('image')->store('admins', 'public');
@@ -86,6 +85,14 @@ class AdminController extends Controller
         ]);
     }
 
+    // ================= LISTE FOURNISSEURS =================
+    public function getAllFournisseurs()
+    {
+        $fournisseurs = Fournisseur::withCount('terrains')->orderBy('created_at', 'desc')->get();
+
+        return response()->json($fournisseurs);
+    }
+
     // ================= ACTIVER FOURNISSEUR =================
     public function activateFournisseur($id)
     {
@@ -125,4 +132,47 @@ class AdminController extends Controller
             'fournisseur' => $fournisseur
         ]);
     }
+
+    // ================= DETAIL FOURNISSEUR =================
+public function getFournisseur($id)
+{
+    $fournisseur = Fournisseur::withCount('terrains')->find($id);
+    if (!$fournisseur) {
+        return response()->json(['message' => 'Fournisseur introuvable'], 404);
+    }
+    return response()->json($fournisseur);
+}
+
+// ================= TERRAINS D'UN FOURNISSEUR =================
+public function getTerrainsFournisseur($id)
+{
+    $terrains = \App\Models\Terrain::where('fournisseur_id', $id)
+        ->withCount('reservations')
+        ->latest()
+        ->get();
+    return response()->json($terrains);
+}
+
+// ================= RÉSERVATIONS D'UN FOURNISSEUR =================
+public function getReservationsFournisseur($id)
+{
+    $terrainIds = \App\Models\Terrain::where('fournisseur_id', $id)->pluck('id');
+    $reservations = \App\Models\Reservation::with(['user', 'terrain', 'payment'])
+        ->whereIn('terrain_id', $terrainIds)
+        ->orderBy('date', 'desc')
+        ->get();
+    return response()->json($reservations);
+}
+
+// ================= PAIEMENTS D'UN FOURNISSEUR =================
+public function getPaymentsFournisseur($id)
+{
+    $terrainIds = \App\Models\Terrain::where('fournisseur_id', $id)->pluck('id');
+    $reservationIds = \App\Models\Reservation::whereIn('terrain_id', $terrainIds)->pluck('id');
+    $payments = \App\Models\Payment::with(['reservation.terrain', 'user'])
+        ->whereIn('reservation_id', $reservationIds)
+        ->orderBy('created_at', 'desc')
+        ->get();
+    return response()->json($payments);
+}
 }
