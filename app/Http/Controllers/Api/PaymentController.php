@@ -30,26 +30,19 @@ class PaymentController extends Controller
 
         return DB::transaction(function () use ($request) {
 
-            // ===== Charger la réservation avec verrou =====
             $reservation = Reservation::with('terrain')
                 ->lockForUpdate()
                 ->findOrFail($request->reservation_id);
 
-            // ===== Sécurité utilisateur =====
             if ($reservation->user_id !== $request->user()->id) {
                 return response()->json(['message' => 'Non autorisé'], 403);
             }
 
-            // ===== Statuts bloquants =====
-            if ($reservation->statut === 'confirmee') {
-                return response()->json(['message' => 'Cette réservation est déjà confirmée'], 409);
+            if (in_array($reservation->statut, ['confirmee', 'annulee'])) {
+                return response()->json(['message' => 'Cette réservation n\'est pas éligible au paiement'], 409);
             }
 
-            if ($reservation->statut === 'annulee') {
-                return response()->json(['message' => 'Cette réservation a été annulée'], 409);
-            }
-
-            // ===== Vérifier paiement en_attente sur CETTE réservation =====
+            // Vérifier et libérer paiement en_attente expiré
             $paiementEnCours = Payment::where('reservation_id', $reservation->id)
                 ->where('statut', 'en_attente')
                 ->latest()
@@ -62,45 +55,36 @@ class PaymentController extends Controller
                     ], 409);
                 }
 
-                // Paiement expiré → libérer
                 $paiementEnCours->update(['statut' => 'echoue']);
                 $reservation->update(['statut' => 'en_attente']);
                 $reservation->refresh();
             }
 
-            // ===== Vérifier paiement déjà validé =====
-            $dejaPaye = Payment::where('reservation_id', $reservation->id)
+            // Vérifier paiement déjà validé
+            if (Payment::where('reservation_id', $reservation->id)
                 ->where('statut', 'valide')
-                ->exists();
-
-            if ($dejaPaye) {
+                ->exists()) {
                 return response()->json(['message' => 'Cette réservation est déjà payée'], 409);
             }
 
-            // ===== Calcul du montant =====
+            // Calcul du montant
             $terrain = $reservation->terrain;
-
             if (!$terrain || !$terrain->prix_par_heure) {
                 return response()->json(['message' => 'Prix du terrain non disponible'], 422);
             }
 
             $debut = Carbon::parse($reservation->heure_debut);
             $fin   = Carbon::parse($reservation->heure_fin);
-
             if ($fin->lt($debut)) {
                 $fin->addDay();
             }
 
-            $dureeHeures = $fin->diffInHours($debut);
-            if ($dureeHeures <= 0) $dureeHeures = 1;
-
+            $dureeHeures = max(1, $fin->diffInHours($debut));
             $montantTotal  = $terrain->prix_par_heure * $dureeHeures;
-            $montantAPayer = $request->type === 'entier'
-                ? $montantTotal
-                : round($montantTotal * 0.5);
-            $reste = $montantTotal - $montantAPayer;
+            $montantAPayer = $request->type === 'entier' ? $montantTotal : round($montantTotal * 0.5);
+            $reste         = $montantTotal - $montantAPayer;
 
-            // ===== Vérification créneau toujours libre =====
+            // Vérifications créneau et horaire bloqué
             $creneauPris = Reservation::where('terrain_id', $reservation->terrain_id)
                 ->whereDate('date', $reservation->date)
                 ->where('id', '!=', $reservation->id)
@@ -111,12 +95,9 @@ class PaymentController extends Controller
 
             if ($creneauPris) {
                 $reservation->update(['statut' => 'annulee']);
-                return response()->json([
-                    'message' => 'Ce créneau vient d\'être pris. Votre réservation a été annulée.'
-                ], 409);
+                return response()->json(['message' => 'Ce créneau vient d\'être pris. Votre réservation a été annulée.'], 409);
             }
 
-            // ===== Vérification horaire bloqué =====
             $isBlocked = HoraireBloque::where('terrain_id', $reservation->terrain_id)
                 ->whereDate('date', $reservation->date)
                 ->where('heure_debut', '<', $reservation->heure_fin)
@@ -127,30 +108,24 @@ class PaymentController extends Controller
                 return response()->json(['message' => 'Ce créneau est bloqué'], 409);
             }
 
-            // ===== Appel PayTech =====
-            $redirectUrl  = null;
-            $paytechToken = null;
-
+            // Appel PayTech
             $paytechResult = $this->initierPaiementPaytech(
-                reservation : $reservation,
-                terrain      : $terrain,
+                reservation: $reservation,
+                terrain: $terrain,
                 montantAPayer: $montantAPayer,
-                userId       : $request->user()->id,
-                type         : $request->type,
-                methode      : $request->methode,
-                montantTotal : $montantTotal,
-                reste        : $reste,
-                contexte     : 'initial' // ← identifie le type de paiement dans l'IPN
+                userId: $request->user()->id,
+                type: $request->type,
+                methode: $request->methode,
+                montantTotal: $montantTotal,
+                reste: $reste,
+                contexte: 'initial'
             );
 
             if ($paytechResult['error']) {
                 return response()->json(['message' => $paytechResult['message']], $paytechResult['code']);
             }
 
-            $redirectUrl  = $paytechResult['redirect_url'];
-            $paytechToken = $paytechResult['token'];
-
-            // ===== Créer le paiement en attente =====
+            // Créer le paiement
             $payment = Payment::create([
                 'reservation_id'     => $reservation->id,
                 'user_id'            => $request->user()->id,
@@ -160,16 +135,15 @@ class PaymentController extends Controller
                 'type'               => $request->type,
                 'methode'            => $request->methode,
                 'statut'             => 'en_attente',
-                'paytech_token'      => $paytechToken,
+                'paytech_token'      => $paytechResult['token'],
                 'paiement_initie_at' => Carbon::now(),
             ]);
 
-            // ===== Verrouiller la réservation =====
             $reservation->update(['statut' => 'paiement_en_cours']);
 
             return response()->json([
                 'message'      => 'Paiement initié avec succès',
-                'redirect_url' => $redirectUrl,
+                'redirect_url' => $paytechResult['redirect_url'],
                 'payment_id'   => $payment->id,
             ], 201);
         });
@@ -188,31 +162,16 @@ class PaymentController extends Controller
 
         return DB::transaction(function () use ($request, $id) {
 
-            // ===== Charger le paiement original avec verrou =====
             $paiementOriginal = Payment::with('reservation.terrain')
                 ->lockForUpdate()
-                ->find($id);
+                ->findOrFail($id);
 
-            if (!$paiementOriginal) {
-                return response()->json(['message' => 'Paiement introuvable'], 404);
-            }
-
-            // ===== Sécurité utilisateur =====
             if ($paiementOriginal->user_id !== $request->user()->id) {
                 return response()->json(['message' => 'Non autorisé'], 403);
             }
 
-            // ===== Vérifications métier =====
-            if ($paiementOriginal->statut !== 'valide') {
-                return response()->json(['message' => 'Ce paiement n\'est pas encore validé'], 409);
-            }
-
-            if ($paiementOriginal->type !== 'partiel') {
-                return response()->json(['message' => 'Ce paiement est déjà complet'], 409);
-            }
-
-            if ($paiementOriginal->reste <= 0) {
-                return response()->json(['message' => 'Il n\'y a aucun reste à payer'], 409);
+            if ($paiementOriginal->statut !== 'valide' || $paiementOriginal->type !== 'partiel' || $paiementOriginal->reste <= 0) {
+                return response()->json(['message' => 'Ce paiement ne peut pas être complété'], 409);
             }
 
             $reservation = $paiementOriginal->reservation;
@@ -222,7 +181,7 @@ class PaymentController extends Controller
                 return response()->json(['message' => 'Cette réservation a été annulée'], 409);
             }
 
-            // ===== Vérifier qu'aucun complément en cours =====
+            // Vérifier aucun complément en cours actif
             $complementEnCours = Payment::where('reservation_id', $reservation->id)
                 ->where('statut', 'en_attente')
                 ->where('id', '!=', $paiementOriginal->id)
@@ -231,27 +190,23 @@ class PaymentController extends Controller
 
             if ($complementEnCours instanceof Payment) {
                 if (!$complementEnCours->isExpiredAndPending()) {
-                    return response()->json([
-                        'message' => 'Un complément de paiement est déjà en cours. Réessayez dans quelques minutes.'
-                    ], 409);
+                    return response()->json(['message' => 'Un complément de paiement est déjà en cours. Réessayez dans quelques minutes.'], 409);
                 }
-                // Expiré → libérer
                 $complementEnCours->update(['statut' => 'echoue']);
             }
 
             $montantReste = (float) $paiementOriginal->reste;
 
-            // ===== Appel PayTech pour le complément =====
             $paytechResult = $this->initierPaiementPaytech(
-                reservation : $reservation,
-                terrain      : $terrain,
+                reservation: $reservation,
+                terrain: $terrain,
                 montantAPayer: $montantReste,
-                userId       : $request->user()->id,
-                type         : 'complement',
-                methode      : $request->methode,
-                montantTotal : (float) $paiementOriginal->montant_total,
-                reste        : 0,
-                contexte     : 'complement',        // ← l'IPN saura que c'est un complément
+                userId: $request->user()->id,
+                type: 'entier',                    // Important : on utilise 'entier' pour compatibilité
+                methode: $request->methode,
+                montantTotal: (float) $paiementOriginal->montant_total,
+                reste: 0,
+                contexte: 'complement',
                 paiementOriginalId: $paiementOriginal->id
             );
 
@@ -259,14 +214,13 @@ class PaymentController extends Controller
                 return response()->json(['message' => $paytechResult['message']], $paytechResult['code']);
             }
 
-            // ===== Créer le paiement de complément en attente =====
             $complement = Payment::create([
                 'reservation_id'     => $reservation->id,
                 'user_id'            => $request->user()->id,
                 'montant_total'      => $paiementOriginal->montant_total,
                 'montant_paye'       => $montantReste,
                 'reste'              => 0,
-                'type'               => 'complement',
+                'type'               => 'entier',
                 'methode'            => $request->methode,
                 'statut'             => 'en_attente',
                 'paytech_token'      => $paytechResult['token'],
@@ -289,46 +243,32 @@ class PaymentController extends Controller
         $apiKey    = env('PAYTECH_API_KEY');
         $apiSecret = env('PAYTECH_API_SECRET');
 
-        // ===== Vérification signature PayTech =====
-        $receivedKeyHash    = $request->input('api_key_sha256');
-        $receivedSecretHash = $request->input('api_secret_sha256');
-
         if (
-            $receivedKeyHash    !== hash('sha256', $apiKey) ||
-            $receivedSecretHash !== hash('sha256', $apiSecret)
+            $request->input('api_key_sha256')    !== hash('sha256', $apiKey) ||
+            $request->input('api_secret_sha256') !== hash('sha256', $apiSecret)
         ) {
             Log::warning('IPN PayTech: signature invalide', $request->all());
             return response()->json(['message' => 'Signature invalide'], 403);
         }
 
-        // ===== Extraire custom_field =====
-        $customField = json_decode($request->input('custom_field'), true);
-
-        if (!$customField || !isset($customField['reservation_id'])) {
-            Log::error('IPN PayTech: custom_field manquant', $request->all());
-            return response()->json(['message' => 'custom_field manquant'], 400);
-        }
-
-        $reservationId     = (int) $customField['reservation_id'];
-        $contexte          = $customField['contexte']            ?? 'initial';
+        $customField = json_decode($request->input('custom_field'), true) ?? [];
+        $reservationId      = (int) ($customField['reservation_id'] ?? 0);
+        $contexte           = $customField['contexte'] ?? 'initial';
         $paiementOriginalId = $customField['paiement_original_id'] ?? null;
 
         return DB::transaction(function () use ($request, $reservationId, $contexte, $paiementOriginalId) {
 
-            // ===== Charger la réservation avec verrou =====
             $reservation = Reservation::lockForUpdate()->find($reservationId);
-
-            if (!($reservation instanceof Reservation)) {
+            if (!$reservation) {
                 return response()->json(['message' => 'Réservation introuvable'], 404);
             }
 
-            // ===== Charger le paiement en_attente lié =====
             $payment = Payment::where('reservation_id', $reservationId)
                 ->where('statut', 'en_attente')
                 ->latest()
                 ->first();
 
-            if (!($payment instanceof Payment)) {
+            if (!$payment) {
                 Log::warning('IPN: paiement en_attente introuvable', ['reservation_id' => $reservationId]);
                 return response()->json(['message' => 'Paiement introuvable'], 404);
             }
@@ -336,53 +276,34 @@ class PaymentController extends Controller
             $typeEvent = $request->input('type_event');
 
             Log::info('IPN PayTech reçu', [
-                'type_event'     => $typeEvent,
-                'contexte'       => $contexte,
+                'type_event' => $typeEvent,
+                'contexte'   => $contexte,
                 'reservation_id' => $reservationId,
-                'ref_command'    => $request->input('ref_command'),
             ]);
 
-            // ===== Paiement réussi =====
             if ($typeEvent === 'sale_complete') {
 
-                // --- CAS 1 : C'est un complément de paiement partiel ---
+                // Cas du complément
                 if ($contexte === 'complement' && $paiementOriginalId) {
-
                     $paiementOriginal = Payment::lockForUpdate()->find($paiementOriginalId);
 
-                    if (!$paiementOriginal) {
-                        Log::error('IPN complement: paiement original introuvable', [
-                            'paiement_original_id' => $paiementOriginalId,
+                    if ($paiementOriginal) {
+                        $payment->update([
+                            'statut'         => 'valide',
+                            'transaction_id' => $request->input('ref_command'),
                         ]);
-                        return response()->json(['message' => 'Paiement original introuvable'], 404);
+
+                        $paiementOriginal->update([
+                            'reste' => 0,
+                            'type'  => 'entier',
+                        ]);
+
+                        Log::info('IPN: complément validé', ['original_id' => $paiementOriginalId]);
+                        return response()->json(['message' => 'OK - complément validé']);
                     }
-
-                    // Valider le complément
-                    $payment->update([
-                        'statut'         => 'valide',
-                        'transaction_id' => $request->input('ref_command'),
-                    ]);
-
-                    // Mettre à jour le paiement original : reste = 0, type = entier
-                    $paiementOriginal->update([
-                        'reste' => 0,
-                        'type'  => 'entier',
-                    ]);
-
-                    // La réservation est déjà confirmée (elle l'était depuis le partiel)
-                    // Pas besoin de la re-confirmer, elle reste 'confirmee'
-
-                    Log::info('IPN: complément validé, paiement soldé', [
-                        'reservation_id'       => $reservationId,
-                        'paiement_original_id' => $paiementOriginalId,
-                    ]);
-
-                    return response()->json(['message' => 'OK - complément validé']);
                 }
 
-                // --- CAS 2 : Paiement initial (partiel ou entier) ---
-
-                // Vérifier si le créneau a été pris entre temps
+                // Cas paiement initial
                 $creneauPris = Reservation::where('terrain_id', $reservation->terrain_id)
                     ->whereDate('date', $reservation->date)
                     ->where('id', '!=', $reservation->id)
@@ -392,58 +313,34 @@ class PaymentController extends Controller
                     ->exists();
 
                 if ($creneauPris) {
-                    $payment->update([
-                        'statut'         => 'rembourse',
-                        'transaction_id' => $request->input('ref_command'),
-                    ]);
+                    $payment->update(['statut' => 'rembourse', 'transaction_id' => $request->input('ref_command')]);
                     $reservation->update(['statut' => 'annulee']);
-
-                    Log::warning('IPN: créneau pris entre temps, remboursement requis', [
-                        'reservation_id' => $reservationId,
-                    ]);
                     return response()->json(['message' => 'OK - remboursement requis']);
                 }
 
-                // Créneau libre → confirmer
                 $payment->update([
                     'statut'         => 'valide',
                     'transaction_id' => $request->input('ref_command'),
                 ]);
                 $reservation->update(['statut' => 'confirmee']);
 
-                Log::info('IPN: réservation confirmée', [
-                    'reservation_id' => $reservationId,
-                    'type'           => $payment->type,
-                ]);
-
                 return response()->json(['message' => 'OK']);
             }
 
-            // ===== Paiement annulé ou échoué =====
+            // Échec ou annulation
             if (in_array($typeEvent, ['sale_canceled', 'sale_failed'])) {
                 $payment->update(['statut' => 'echoue']);
-
-                // Si c'est un complément, la réservation reste confirmée
                 if ($contexte !== 'complement') {
                     $reservation->update(['statut' => 'en_attente']);
                 }
-
-                Log::info('IPN: paiement échoué/annulé', [
-                    'reservation_id' => $reservationId,
-                    'contexte'       => $contexte,
-                ]);
                 return response()->json(['message' => 'OK']);
             }
 
-            Log::warning('IPN: type_event non traité', ['type_event' => $typeEvent]);
             return response()->json(['message' => 'Événement non traité'], 200);
         });
     }
 
-    // ================= MES PAIEMENTS (avec filtre optionnel) =================
-    // GET /my-payments               → tous les paiements
-    // GET /my-payments?filtre=partiel  → paiements partiels validés avec reste > 0
-    // GET /my-payments?filtre=complet  → paiements entiers validés (type=entier OU reste=0)
+    // ================= MES PAIEMENTS & PAIEMENTS À COMPLÉTER =================
     public function myPayments(Request $request)
     {
         $query = Payment::with(['reservation.terrain'])
@@ -452,17 +349,13 @@ class PaymentController extends Controller
         $filtre = $request->query('filtre');
 
         if ($filtre === 'partiel') {
-            // Paiements partiels validés où il reste quelque chose à payer
             $query->where('statut', 'valide')
                   ->where('type', 'partiel')
                   ->where('reste', '>', 0);
-
         } elseif ($filtre === 'complet') {
-            // Paiements totalement soldés
             $query->where('statut', 'valide')
                   ->where(function ($q) {
-                      $q->where('type', 'entier')
-                        ->orWhere('reste', '<=', 0);
+                      $q->where('type', 'entier')->orWhere('reste', '<=', 0);
                   });
         }
 
@@ -471,8 +364,6 @@ class PaymentController extends Controller
         return response()->json($payments);
     }
 
-    // ================= PAIEMENTS PARTIELS À COMPLÉTER =================
-    // GET /my-payments/partiels
     public function partiels(Request $request)
     {
         $payments = Payment::with(['reservation.terrain'])
@@ -504,37 +395,26 @@ class PaymentController extends Controller
         ]);
     }
 
-    // ================= CANCEL =================
     public function cancel(Request $request)
     {
-        return response()->json([
-            'message' => 'Paiement annulé',
-            'statut'  => 'cancel',
-        ]);
+        return response()->json(['message' => 'Paiement annulé', 'statut' => 'cancel']);
     }
 
-    // ================= SUCCESS =================
     public function success(Request $request)
     {
-        return response()->json([
-            'message' => 'Paiement en cours de validation',
-            'statut'  => 'success',
-        ]);
+        return response()->json(['message' => 'Paiement en cours de validation', 'statut' => 'success']);
     }
 
-    // ================= SHOW ONE PAYMENT =================
     public function show($id)
     {
         $payment = Payment::with(['reservation.terrain', 'user'])->find($id);
-
         if (!$payment) {
             return response()->json(['message' => 'Paiement introuvable'], 404);
         }
-
         return response()->json($payment);
     }
 
-    // ================= HELPER PRIVÉ : Appel PayTech =================
+    // ================= HELPER PRIVÉ : APPEL PAYTECH (avec debug renforcé) =================
     private function initierPaiementPaytech(
         $reservation,
         $terrain,
@@ -552,30 +432,24 @@ class PaymentController extends Controller
             'orange_money' => 'Orange Money',
             'card'         => 'Carte Bancaire',
         ];
-        $targetPayment = $methodesPaytech[$methode] ?? 'Wave';
 
         $customField = [
-            'reservation_id'     => $reservation->id,
-            'user_id'            => $userId,
-            'type'               => $type,
-            'montant_total'      => $montantTotal,
-            'montant_paye'       => $montantAPayer,
-            'reste'              => $reste,
-            'methode'            => $methode,
-            'contexte'           => $contexte,
+            'reservation_id' => $reservation->id,
+            'user_id'        => $userId,
+            'type'           => $type,
+            'montant_total'  => $montantTotal,
+            'montant_paye'   => $montantAPayer,
+            'reste'          => $reste,
+            'methode'        => $methode,
+            'contexte'       => $contexte,
         ];
 
         if ($paiementOriginalId) {
             $customField['paiement_original_id'] = $paiementOriginalId;
         }
 
-        $itemName    = $contexte === 'complement'
-            ? 'Complément réservation ' . $terrain->name
-            : 'Réservation ' . $terrain->name;
-
-        $commandName = $contexte === 'complement'
-            ? 'Complément terrain ' . $terrain->name
-            : 'Réservation terrain ' . $terrain->name;
+        $itemName    = $contexte === 'complement' ? 'Complément réservation ' . $terrain->name : 'Réservation ' . $terrain->name;
+        $commandName = $contexte === 'complement' ? 'Complément terrain ' . $terrain->name : 'Réservation terrain ' . $terrain->name;
 
         $paytechResponse = Http::withHeaders([
             'API_KEY'    => env('PAYTECH_API_KEY'),
@@ -590,16 +464,23 @@ class PaymentController extends Controller
             'ipn_url'        => env('PAYTECH_IPN_URL'),
             'success_url'    => env('PAYTECH_SUCCESS_URL'),
             'cancel_url'     => env('PAYTECH_CANCEL_URL'),
-            'target_payment' => $targetPayment,
+            'target_payment' => $methodesPaytech[$methode] ?? 'Wave',
             'custom_field'   => json_encode($customField),
         ]);
 
-        Log::info('PayTech response [' . $contexte . ']', [
-            'status' => $paytechResponse->status(),
-            'body'   => $paytechResponse->body(),
+        // Debug renforcé
+        Log::info("PayTech response [{$contexte}]", [
+            'status'             => $paytechResponse->status(),
+            'body'               => $paytechResponse->body(),
+            'api_key_present'    => !empty(env('PAYTECH_API_KEY')),
+            'api_secret_present' => !empty(env('PAYTECH_API_SECRET')),
         ]);
 
         if (!$paytechResponse->successful()) {
+            Log::error("PayTech HTTP Error [{$contexte}]", [
+                'status' => $paytechResponse->status(),
+                'body'   => $paytechResponse->body(),
+            ]);
             return [
                 'error'   => true,
                 'message' => 'PayTech indisponible. Réessayez. (' . $paytechResponse->status() . ')',
@@ -610,7 +491,7 @@ class PaymentController extends Controller
         $paytechData = $paytechResponse->json();
 
         if (!isset($paytechData['success']) || $paytechData['success'] != 1) {
-            Log::error('PayTech échec', ['data' => $paytechData]);
+            Log::error("PayTech business error [{$contexte}]", ['data' => $paytechData]);
             return [
                 'error'   => true,
                 'message' => $paytechData['errors'][0] ?? 'Erreur PayTech. Vérifiez vos clés API.',
