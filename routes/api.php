@@ -51,6 +51,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/check/{terrain_id}',   [FavoriController::class, 'check']);    // vérifier si en favori
         Route::delete('/{terrain_id}',      [FavoriController::class, 'destroy']); // retirer des favoris
     });
+
+    Route::post('/user/update-image',    [UserController::class, 'updateImage']);
+    Route::put('/user/update-password',  [UserController::class, 'updatePassword']);
+    Route::put('/user/update-profile',   [UserController::class, 'updateProfile']);
 });
 
 /*
