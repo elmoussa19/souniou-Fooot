@@ -53,4 +53,10 @@ class User extends Authenticatable
     {
         return $this->hasMany(Reservation::class);
     }
+
+        public function terrainsFavoris()
+    {
+        return $this->belongsToMany(Terrain::class, 'favoris')
+                    ->withTimestamps();
+    }
 }

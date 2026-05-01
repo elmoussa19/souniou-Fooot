@@ -48,4 +48,11 @@ class Terrain extends Model
     {
         return $this->hasMany(HoraireBloque::class);
     }
+
+        // Utilisateurs qui ont ce terrain en favori
+    public function usersFavoris()
+    {
+        return $this->belongsToMany(User::class, 'favoris')
+                    ->withTimestamps();
+    }
 }

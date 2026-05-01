@@ -11,7 +11,7 @@ use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\ReservationController;
 use App\Http\Controllers\Api\TerrainController;
 use App\Http\Controllers\Api\TerrainHoraireController;
-
+use App\Http\Controllers\Api\FavoriController;
 /*
 |--------------------------------------------------------------------------
 | PAYTECH — Routes publiques (PayTech appelle directement, pas de auth)
@@ -43,6 +43,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/my-payments/partiels',         [PaymentController::class, 'partiels']);     // paiements partiels à compléter
     Route::post('/payments/{id}/complete',      [PaymentController::class, 'complete']);     // compléter un paiement partiel
     Route::get('/payments/{id}',                [PaymentController::class, 'show']);
+
+     Route::prefix('favoris')->group(function () {
+        Route::get('/',                     [FavoriController::class, 'index']);    // liste des terrains favoris
+        Route::post('/',                    [FavoriController::class, 'store']);    // ajouter aux favoris
+        Route::post('/toggle',              [FavoriController::class, 'toggle']);   // toggle (ajouter ou retirer)
+        Route::get('/check/{terrain_id}',   [FavoriController::class, 'check']);    // vérifier si en favori
+        Route::delete('/{terrain_id}',      [FavoriController::class, 'destroy']); // retirer des favoris
+    });
 });
 
 /*
