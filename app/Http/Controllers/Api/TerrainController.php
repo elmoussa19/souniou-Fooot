@@ -6,6 +6,8 @@ use App\Http\Controllers\Controller;
 use App\Models\Terrain;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Storage;
+
 
 class TerrainController extends Controller
 {
@@ -76,7 +78,7 @@ class TerrainController extends Controller
     }
 
     // ================= SHOW ONE TERRAIN =================
-    public function show($id)
+    public function show(int $id)
     {
         $terrain = Terrain::with('fournisseur')->find($id);
 
@@ -88,7 +90,7 @@ class TerrainController extends Controller
     }
 
     // ================= UPDATE TERRAIN (avec gestion des 3 images) =================
-    public function update(Request $request, $id)
+    public function update(Request $request, int $id)
     {
         $terrain = Terrain::find($id);
 
@@ -202,4 +204,107 @@ class TerrainController extends Controller
 
         return response()->json($terrains);
     }
+
+    // ================= UPDATE IMAGE 1 =================
+public function updateImage1(Request $request, int $id)
+{
+    $terrain = Terrain::find($id);
+
+    if (!$terrain) {
+        return response()->json(['message' => 'Terrain introuvable'], 404);
+    }
+
+    if ($terrain->fournisseur_id != $request->user()->id) {
+        return response()->json(['message' => 'Non autorisé'], 403);
+    }
+
+    $validator = Validator::make($request->all(), [
+        'image1' => 'required|image|mimes:jpg,jpeg,png|max:2048',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json($validator->errors(), 422);
+    }
+
+    // Supprimer l'ancienne image si elle existe
+    if ($terrain->image1) {
+        Storage::disk('public')->delete($terrain->image1);
+    }
+
+    $terrain->image1 = $request->file('image1')->store('terrains', 'public');
+    $terrain->save();
+
+    return response()->json([
+        'message' => 'Image 1 mise à jour avec succès',
+        'image1'  => $terrain->image1
+    ]);
+}
+
+// ================= UPDATE IMAGE 2 =================
+public function updateImage2(Request $request, int $id)
+{
+    $terrain = Terrain::find($id);
+
+    if (!$terrain) {
+        return response()->json(['message' => 'Terrain introuvable'], 404);
+    }
+
+    if ($terrain->fournisseur_id != $request->user()->id) {
+        return response()->json(['message' => 'Non autorisé'], 403);
+    }
+
+    $validator = Validator::make($request->all(), [
+        'image2' => 'required|image|mimes:jpg,jpeg,png|max:2048',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json($validator->errors(), 422);
+    }
+
+    if ($terrain->image2) {
+        Storage::disk('public')->delete($terrain->image2);
+    }
+
+    $terrain->image2 = $request->file('image2')->store('terrains', 'public');
+    $terrain->save();
+
+    return response()->json([
+        'message' => 'Image 2 mise à jour avec succès',
+        'image2'  => $terrain->image2
+    ]);
+}
+
+// ================= UPDATE IMAGE 3 =================
+public function updateImage3(Request $request, int $id)
+{
+    $terrain = Terrain::find($id);
+
+    if (!$terrain) {
+        return response()->json(['message' => 'Terrain introuvable'], 404);
+    }
+
+    if ($terrain->fournisseur_id != $request->user()->id) {
+        return response()->json(['message' => 'Non autorisé'], 403);
+    }
+
+    $validator = Validator::make($request->all(), [
+        'image3' => 'required|image|mimes:jpg,jpeg,png|max:2048',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json($validator->errors(), 422);
+    }
+
+    if ($terrain->image3) {
+        Storage::disk('public')->delete($terrain->image3);
+    }
+
+    $terrain->image3 = $request->file('image3')->store('terrains', 'public');
+    $terrain->save();
+
+    return response()->json([
+        'message' => 'Image 3 mise à jour avec succès',
+        'image3'  => $terrain->image3
+    ]);
+}
 }

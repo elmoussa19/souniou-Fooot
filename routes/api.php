@@ -68,6 +68,10 @@ Route::post('/fournisseur/login',    [FournisseurController::class, 'login']);
 Route::middleware(['auth:sanctum', 'is_fournisseur'])->group(function () {
     Route::post('/fournisseur/logout', [FournisseurController::class, 'logout']);
 
+    Route::post('terrains/{id}/image1', [TerrainController::class, 'updateImage1']);
+    Route::post('terrains/{id}/image2', [TerrainController::class, 'updateImage2']);
+    Route::post('terrains/{id}/image3', [TerrainController::class, 'updateImage3']);
+
     // Gestion terrains
     Route::post('/terrains',        [TerrainController::class, 'store']);
     Route::get('/my-terrains',      [TerrainController::class, 'myTerrains']);
