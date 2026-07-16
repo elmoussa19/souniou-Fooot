@@ -19,6 +19,12 @@ class IsFournisseur
             ], 403);
         }
 
+        if (!$user->is_active) {
+            return response()->json([
+                'message' => 'Compte désactivé'
+            ], 403);
+        }
+
         return $next($request);
     }
 }
